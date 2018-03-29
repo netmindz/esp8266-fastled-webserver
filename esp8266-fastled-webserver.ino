@@ -30,6 +30,7 @@ extern "C" {
 #include <WebSocketsServer.h>
 #include <FS.h>
 #include <EEPROM.h>
+#include <ESPAsyncE131.h>
 //#include <IRremoteESP8266.h>
 #include "GradientPalettes.h"
 
@@ -59,6 +60,12 @@ ESP8266HTTPUpdateServer httpUpdateServer;
 
 #define MILLI_AMPS         2000     // IMPORTANT: set the max milli-Amps of your power supply (4A = 4000mA)
 #define FRAMES_PER_SECOND  120 // here you can control the speed. With the Access Point / Web Server the animations run a bit slower.
+
+#define UNIVERSE 1        // First DMX Universe to listen for
+#define UNIVERSE_COUNT 1  // Total number of Universes to listen for, starting at UNIVERSE
+#define CHANNEL_START 1 // What DMX channel to start on
+ESPAsyncE131 e131(UNIVERSE_COUNT); // Create single universe
+
 
 CRGB leds[NUM_LEDS];
 
@@ -433,6 +440,16 @@ void setup() {
   Serial.println("Web socket server started");
 
   autoPlayTimeout = millis() + (autoplayDuration * 1000);
+
+  // Choose one to begin listening for E1.31 data
+  //if (e131.begin(E131_UNICAST)) {
+  if (e131.begin(E131_MULTICAST, UNIVERSE, UNIVERSE_COUNT)) {  // Listen via Multicast
+    Serial.println(F("Listening for E1.31 data..."));
+  }
+  else {
+    Serial.println(F("*** e131.begin failed ***"));
+  }
+
 }
 
 void sendInt(uint8_t value)
@@ -478,6 +495,8 @@ void loop() {
     return;
   }
 
+    processE131(); // Read E1.31 data and update variables
+
   // EVERY_N_SECONDS(10) {
   //   Serial.print( F("Heap: ") ); Serial.println(system_get_free_heap_size());
   // }
@@ -506,6 +525,51 @@ void loop() {
 
   // insert a delay to keep the framerate modest
   // FastLED.delay(1000 / FRAMES_PER_SECOND);
+}
+
+void processE131() {
+    if (!e131.isEmpty()) {
+      e131_packet_t packet;
+      e131.pull(&packet);     // Pull packet from ring buffer
+
+      EVERY_N_SECONDS(10) {
+        Serial.printf("Universe %u / %u Channels | Packet#: %u / Errors: %u / CH1: %u\n",
+                    htons(packet.universe),                 // The Universe for this packet
+                    htons(packet.property_value_count) - 1, // Start code is ignored, we're interested in dimmer data
+                    e131.stats.num_packets,                 // Packet counter
+                    e131.stats.packet_errors,               // Packet error counter
+                    packet.property_values[1]);             // Dimmer data for Channel 1
+      }
+
+    int brightnessNew = map(packet.property_values[(CHANNEL_START  + 0)], 0, 255, 0, 255);
+    if(brightness !=  brightnessNew) {
+      setBrightness(brightness);
+    }
+
+
+    int currentPatternIndexNew = map(packet.property_values[(CHANNEL_START  + 1)], 0, 255, 0, (patternCount - 1));
+    if(currentPatternIndexNew != currentPatternIndexNew) {
+      Serial.println("Change pattern");
+      setPattern(currentPatternIndexNew);
+    }
+
+    byte r = packet.property_values[(CHANNEL_START  + 2)];
+    byte g = packet.property_values[(CHANNEL_START  + 3)];
+    byte b = packet.property_values[(CHANNEL_START  + 4)];
+
+    if (r != 0 || g != 0 || b != 0) {
+      if(solidColor != CRGB(r, g, b)) {
+        Serial.println("Set color");
+        setSolidColor(r,g,b);
+      }
+    }
+
+  //  power = packet.property_values[(CHANNEL_START  + 5)]; // EEPROM.read(5);
+
+  //  autoplay = packet.property_values[(CHANNEL_START  + 6)]; // EEPROM.read(6);
+  //  autoplayDuration = packet.property_values[(CHANNEL_START  + 7)]; // EEPROM.read(7);
+  }
+
 }
 
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
